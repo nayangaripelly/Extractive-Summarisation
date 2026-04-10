@@ -1,0 +1,6 @@
+structure.txt
+requirements.txt
+/data
+/data/train.csv
+/data/train.csv.zip
+/venv
