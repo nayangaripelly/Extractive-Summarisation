@@ -4,3 +4,5 @@ requirements.txt
 /data/train.csv
 /data/train.csv.zip
 /venv
+__pycache__/
+*.py[cod]
