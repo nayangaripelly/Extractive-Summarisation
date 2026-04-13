@@ -6,7 +6,7 @@ from tqdm import tqdm
 from src.data_preprocessing.loader import get_dataset, preprocess_data
 from src.utils.selection import greedy_selection_with_trigram_blocking
 
-def evaluate(model, tokenizer):
+def evaluate(model, tokenizer, device):
     """
     Evaluates the model on the test set.
     """
@@ -20,9 +20,9 @@ def evaluate(model, tokenizer):
         # This collate function will handle single items since batch_size is 1
         item = batch[0]
         return {
-            'input_ids': item['input_ids'],
-            'attention_mask': item['attention_mask'],
-            'cls_positions': item['cls_positions'].unsqueeze(0),
+            'input_ids': torch.tensor(item['input_ids'], dtype=torch.long).unsqueeze(0),
+            'attention_mask': torch.tensor(item['attention_mask'], dtype=torch.long).unsqueeze(0),
+            'cls_positions': torch.tensor(item['cls_positions'], dtype=torch.long).unsqueeze(0),
             'original_sentences': [item['original_sentences']],
             'highlights': [item['highlights']]
         }
@@ -34,9 +34,9 @@ def evaluate(model, tokenizer):
     
     with torch.no_grad():
         for batch in tqdm(test_dataloader, desc="Evaluating"):
-            input_ids = batch['input_ids']
-            attention_mask = batch['attention_mask']
-            cls_positions = batch['cls_positions']
+            input_ids = batch['input_ids'].to(device)
+            attention_mask = batch['attention_mask'].to(device)
+            cls_positions = batch['cls_positions'].to(device)
             original_sentences = batch['original_sentences'][0]
             highlights = batch['highlights'][0]
 
