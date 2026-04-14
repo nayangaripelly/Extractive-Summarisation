@@ -3,15 +3,17 @@ from torch.utils.data import DataLoader
 from transformers import AutoTokenizer
 from src.data_preprocessing.loader import get_dataset, preprocess_data
 from src.model.summarizer import BertSum
-from src.utils.selection import greedy_selection_with_trigram_blocking
+from src.utils.selection import greedy_selection_with_trigram_blocking, select_indices_with_trigram_blocking
 import torch.optim as optim
 from src.training.evaluate import evaluate
 import multiprocessing
 from tqdm import tqdm
+from rouge_score import rouge_scorer
 
 def train(model, dataloader, optimizer, loss_function, device):
     model.train()
     total_loss = 0
+    rouge = rouge_scorer.RougeScorer(['rouge1'], use_stemmer=True)
     pbar = tqdm(dataloader, desc="Training")
     for batch in pbar:
         if batch is None:
@@ -35,7 +37,17 @@ def train(model, dataloader, optimizer, loss_function, device):
         optimizer.step()
 
         total_loss += loss.item()
-        pbar.set_postfix({'loss': f"{loss.item():.4f}"})
+        # Compute ROUGE between model summary and oracle summary (logging only)
+        batch_oracle = batch['oracle_summary']
+        batch_sentences = batch['original_sentences']
+        batch_scores = salience_scores.detach().cpu().tolist()
+        rouge_vals = []
+        for sentences, scores, oracle_summary in zip(batch_sentences, batch_scores, batch_oracle):
+            _, selected_sentences = select_indices_with_trigram_blocking(sentences, scores)
+            model_summary = " ".join(selected_sentences)
+            rouge_vals.append(rouge.score(oracle_summary, model_summary)['rouge1'].fmeasure)
+        avg_rouge = sum(rouge_vals) / max(len(rouge_vals), 1)
+        pbar.set_postfix({'loss': f"{loss.item():.4f}", 'rouge1': f"{avg_rouge:.4f}"})
 
     return total_loss / len(dataloader) if len(dataloader) > 0 else 0
 
@@ -66,67 +78,34 @@ if __name__ == '__main__':
     
     # Filter out examples that couldn't be processed
     train_dataset = train_dataset.filter(lambda x: x is not None)
+    # Use only the first 20,000 rows for faster training
+    train_dataset = train_dataset.select(range(min(20000, len(train_dataset))))
 
     def collate_fn(batch):
         batch = [item for item in batch if item is not None]
         if not batch:
             return None
 
-        # Convert lists to tensors for each item
-        for item in batch:
-            item['input_ids'] = torch.tensor(item['input_ids'], dtype=torch.long)
-            item['attention_mask'] = torch.tensor(item['attention_mask'], dtype=torch.long)
-            item['cls_positions'] = torch.tensor(item['cls_positions'], dtype=torch.long)
-            item['labels'] = torch.tensor(item['labels'], dtype=torch.float32)
+        input_ids = [torch.tensor(item['input_ids'], dtype=torch.long) for item in batch]
+        attention_mask = [torch.tensor(item['attention_mask'], dtype=torch.long) for item in batch]
+        cls_positions = [torch.tensor(item['cls_positions'], dtype=torch.long) for item in batch]
+        labels = [torch.tensor(item['labels'], dtype=torch.float32) for item in batch]
 
-        # Normalize sentence count per item (trim to the smallest available length)
-        normalized = []
-        for item in batch:
-            num_sents = min(
-                item['input_ids'].shape[0],
-                item['attention_mask'].shape[0],
-                item['cls_positions'].shape[0],
-                item['labels'].shape[0],
-            )
-            normalized.append({
-                'input_ids': item['input_ids'][:num_sents],
-                'attention_mask': item['attention_mask'][:num_sents],
-                'cls_positions': item['cls_positions'][:num_sents],
-                'labels': item['labels'][:num_sents],
-                'original_sentences': item['original_sentences'][:num_sents],
-            })
+        max_seq = max(t.size(0) for t in input_ids)
+        max_sents = max(t.size(0) for t in cls_positions)
 
-        max_sents = max(item['input_ids'].shape[0] for item in normalized)
-
-        input_ids_padded = []
-        attention_mask_padded = []
-        cls_positions_padded = []
-        labels_padded = []
-        original_sentences = []
-
-        for item in normalized:
-            pad_sents = max_sents - item['input_ids'].shape[0]
-
-            input_ids_padded.append(
-                torch.nn.functional.pad(item['input_ids'], (0, 0, 0, pad_sents), value=0)
-            )
-            attention_mask_padded.append(
-                torch.nn.functional.pad(item['attention_mask'], (0, 0, 0, pad_sents), value=0)
-            )
-            cls_positions_padded.append(
-                torch.nn.functional.pad(item['cls_positions'], (0, pad_sents), value=0)
-            )
-            labels_padded.append(
-                torch.nn.functional.pad(item['labels'], (0, pad_sents), value=0.0)
-            )
-            original_sentences.append(item['original_sentences'])
+        input_ids_padded = [torch.nn.functional.pad(t, (0, max_seq - t.size(0)), value=0) for t in input_ids]
+        attention_mask_padded = [torch.nn.functional.pad(t, (0, max_seq - t.size(0)), value=0) for t in attention_mask]
+        cls_positions_padded = [torch.nn.functional.pad(t, (0, max_sents - t.size(0)), value=0) for t in cls_positions]
+        labels_padded = [torch.nn.functional.pad(t, (0, max_sents - t.size(0)), value=0.0) for t in labels]
 
         return {
             'input_ids': torch.stack(input_ids_padded),
             'attention_mask': torch.stack(attention_mask_padded),
             'cls_positions': torch.stack(cls_positions_padded),
             'labels': torch.stack(labels_padded),
-            'original_sentences': original_sentences,
+            'original_sentences': [item['original_sentences'] for item in batch],
+            'oracle_summary': [item['oracle_summary'] for item in batch],
         }
 
     train_dataloader = DataLoader(train_dataset, batch_size=BATCH_SIZE, collate_fn=collate_fn, shuffle=True)

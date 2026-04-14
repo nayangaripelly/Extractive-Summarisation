@@ -14,7 +14,7 @@ def evaluate(model, tokenizer, device):
     
     # Load test data
     test_dataset = get_dataset('test').map(lambda x: preprocess_data(x, tokenizer))
-    test_dataset = test_dataset.filter(lambda x: len(x['cls_positions']) > 0 and len(x['original_sentences']) > 0)
+    test_dataset = test_dataset.filter(lambda x: x is not None and len(x['cls_positions']) > 0 and len(x['original_sentences']) > 0)
 
     def collate_fn(batch):
         # This collate function will handle single items since batch_size is 1
@@ -24,7 +24,7 @@ def evaluate(model, tokenizer, device):
             'attention_mask': torch.tensor(item['attention_mask'], dtype=torch.long).unsqueeze(0),
             'cls_positions': torch.tensor(item['cls_positions'], dtype=torch.long).unsqueeze(0),
             'original_sentences': [item['original_sentences']],
-            'highlights': [item['highlights']]
+            'oracle_summary': [item['oracle_summary']]
         }
 
     test_dataloader = DataLoader(test_dataset, batch_size=1, collate_fn=collate_fn)
@@ -38,13 +38,13 @@ def evaluate(model, tokenizer, device):
             attention_mask = batch['attention_mask'].to(device)
             cls_positions = batch['cls_positions'].to(device)
             original_sentences = batch['original_sentences'][0]
-            highlights = batch['highlights'][0]
+            oracle_summary = batch['oracle_summary'][0]
 
             salience_scores = model(input_ids, attention_mask, cls_positions).squeeze(0).tolist()
             
             generated_summary = greedy_selection_with_trigram_blocking(original_sentences, salience_scores)
             
-            scores = scorer.score(highlights, generated_summary)
+            scores = scorer.score(oracle_summary, generated_summary)
             total_scores['rouge1'] += scores['rouge1'].fmeasure
             total_scores['rouge2'] += scores['rouge2'].fmeasure
             total_scores['rougeL'] += scores['rougeL'].fmeasure
